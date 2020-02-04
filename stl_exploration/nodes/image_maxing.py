@@ -9,7 +9,7 @@ import message_filters
 image_pub = None
 camera_info_pub = None
 bridge = CvBridge()
-max_meters = 7
+max_meters = 7.1
 
 
 def callback(image_msg, camera_info_msg):

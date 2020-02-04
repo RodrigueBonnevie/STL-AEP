@@ -17,6 +17,10 @@ find_package(catkin REQUIRED COMPONENTS
   actionlib
 
   dynamic_reconfigure
+
+  ufomap
+  ufomap_ros
+  ufomap_visualization
 )
 find_package(cmake_modules REQUIRED)
 find_package(Eigen3 REQUIRED)

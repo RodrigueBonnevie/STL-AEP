@@ -9,8 +9,8 @@
 
 #include <tf/transform_listener.h>
 
-#include <octomap/octomap.h>
-#include <octomap_msgs/conversions.h>
+//#include <octomap/octomap.h>  // these two still gets included in some of stl_aeplanners .h files.
+//#include <octomap_msgs/conversions.h>
 
 #include <eigen3/Eigen/Dense>
 
@@ -34,6 +34,14 @@
 
 #include <dd_gazebo_plugins/Router.h>
 
+#include <ufomap/ufomap.h>
+#include <ufomap_ros/conversions.h>
+#include <ufomap_visualization/visualization.h>
+#include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
+#include <tf2_sensor_msgs/tf2_sensor_msgs.h>
+#include <mutex>
+
 namespace stl_aeplanner
 {
 typedef std::pair<point, std::shared_ptr<RRTNode>> value;
@@ -56,12 +64,23 @@ private:
   std::shared_ptr<RRTNode> best_node_;
   std::shared_ptr<RRTNode> best_branch_root_;
 
-  std::shared_ptr<octomap::OcTree> ot_;
+  //std::shared_ptr<octomap::OcTree> ot_;
 
+  // Ufomap with dynamic parameters
+  int session_no_ = 0;
+  double ufomap_max_range_ = 7;
+  ufomap::Octree ufomap_;  
+  std::mutex ufomap_mutex_;
+  geometry_msgs::TransformStamped transform_;  // Ros transform for pointcloud to ufomap
+  
   // Subscribers
-  ros::Subscriber octomap_sub_;
+//  ros::Subscriber octomap_sub_;
   ros::Subscriber agent_pose_sub_;
   ros::Subscriber router_sub_;
+  ros::Subscriber transform_sub_;
+  ros::Subscriber ufomap_sub_;
+
+
 
   // Publishers
   ros::Publisher rrt_marker_pub_;
@@ -95,30 +114,35 @@ private:
   double ltl_mean_closest_altitude_;
   std::vector<double> ltl_closest_altitude_;
   double ltl_max_search_distance_;
-  std::vector<std::pair<octomap::point3d, double>> ltl_search_distances_;
+//  std::vector<std::pair<octomap::point3d, double>> ltl_search_distances_;
   double ltl_step_size_;
   std::map<int, std::pair<geometry_msgs::Pose, double>> ltl_routers_;
 
   double max_sampling_radius_squared_;
 
-  point_rtree getRtree(std::shared_ptr<octomap::OcTree> ot, octomap::point3d min, octomap::point3d max);
+//  point_rtree getRtree(std::shared_ptr<octomap::OcTree> ot, octomap::point3d min, octomap::point3d max);
 
   // Service server callback
   bool reevaluate(stl_aeplanner_msgs::Reevaluate::Request& req, stl_aeplanner_msgs::Reevaluate::Response& res);
 
   // ---------------- Initialization ----------------
-  std::shared_ptr<RRTNode> initialize(value_rtree* rtree, const Eigen::Vector4d& current_state);
-  void initializeKDTreeWithPreviousBestBranch(value_rtree* rtree, std::shared_ptr<RRTNode> root);
+  std::shared_ptr<RRTNode> initialize(value_rtree* rtree, 
+                                      std::shared_ptr<point_rtree> stl_rtree,
+                                      const Eigen::Vector4d& current_state);
+  void initializeKDTreeWithPreviousBestBranch(value_rtree* rtree, 
+                                                std::shared_ptr<point_rtree> stl_rtree, 
+                                                std::shared_ptr<RRTNode> root);
   void reevaluatePotentialInformationGainRecursive(std::shared_ptr<RRTNode> node);
 
   // ---------------- Expand RRT Tree ----------------
-  void expandRRT(std::shared_ptr<octomap::OcTree> ot, value_rtree* rtree, std::shared_ptr<point_rtree> stl_rtree,
-                 const Eigen::Vector4d& current_state);
+//  void expandRRT(std::shared_ptr<octomap::OcTree> ot, value_rtree* rtree, std::shared_ptr<point_rtree> stl_rtree,
+//                 const Eigen::Vector4d& current_state);
 
   Eigen::Vector4d sampleNewPoint();
   bool isInsideBoundaries(Eigen::Vector4d point);
   bool isInsideBoundaries(Eigen::Vector3d point);
-  bool isInsideBoundaries(octomap::point3d point);
+//  bool isInsideBoundaries(octomap::point3d point);
+  bool isInsideBoundaries(ufomap::Point3f point);
   bool collisionLine(std::shared_ptr<point_rtree> stl_rtree, Eigen::Vector4d p1, Eigen::Vector4d p2, double r);
   std::shared_ptr<RRTNode> chooseParent(const value_rtree& rtree, std::shared_ptr<point_rtree> stl_rtree,
                                         std::shared_ptr<RRTNode> node, double l);
@@ -135,8 +159,10 @@ private:
 
   geometry_msgs::Pose vecToPose(Eigen::Vector4d state);
 
-  float CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2, float lsq, float rsq,
-                          const octomap::point3d& pt);
+//  float CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2, float lsq, float rsq,
+ //                         const octomap::point3d& pt);
+  float CylTest_CapsFirst(const ufomap::Point3d& pt1, const ufomap::Point3d& pt2, float lsq, float rsq,
+                                      const ufomap::Point3d& pt);
 
   // ---------------- Frontier ----------------
   geometry_msgs::PoseArray getFrontiers();
@@ -154,8 +180,19 @@ public:
 
   void execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal);
 
-  void octomapCallback(const octomap_msgs::Octomap& msg);
+  // Ufomap
+//  void octomapCallback(const octomap_msgs::Octomap& msg);
   void agentPoseCallback(const geometry_msgs::PoseStamped& msg);
+  void ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
+  point_rtree getRtreeUfomap(ufomap::Point3f min, ufomap::Point3f max);
+  std::pair<double, double> gainCubatureUfomap(Eigen::Vector4d state);
+  void expandRRTUfomap(value_rtree* rtree,
+                                 std::shared_ptr<point_rtree> stl_rtree,
+                                 const Eigen::Vector4d& current_state);
+
+  void transformCallback(const geometry_msgs::TransformStamped::ConstPtr& msg);
+  ufomap_visualization::Visualization ufomap_viz_;
+
 };
 
 }  // namespace stl_aeplanner

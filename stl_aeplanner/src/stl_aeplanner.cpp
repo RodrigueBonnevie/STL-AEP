@@ -10,25 +10,30 @@
 
 #include <omp.h>
 
+
 namespace stl_aeplanner
 {
 STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   : nh_(nh)
   , as_(nh_, "make_plan", boost::bind(&STLAEPlanner::execute, this, _1), false)
-  , octomap_sub_(nh_.subscribe("octomap", 1, &STLAEPlanner::octomapCallback, this))
+  //, octomap_sub_(nh_.subscribe("octomap", 1, &STLAEPlanner::octomapCallback, this))
   , agent_pose_sub_(nh_.subscribe("agent_pose", 1, &STLAEPlanner::agentPoseCallback, this))
   , router_sub_(nh_.subscribe("/router", 10, &STLAEPlanner::routerCallback, this))
+  , transform_sub_(nh_.subscribe("/transform", 1, &STLAEPlanner::transformCallback, this))
+  , ufomap_sub_(nh_.subscribe("/virtual_camera/depth/points", 10, &STLAEPlanner::ufomapCallback, this))
   , rrt_marker_pub_(nh_.advertise<visualization_msgs::MarkerArray>("rrtree", 1000))
   , gain_pub_(nh_.advertise<stl_aeplanner_msgs::Node>("gain_node", 1000))
   , gp_query_client_(nh_.serviceClient<stl_aeplanner_msgs::Query>("gp_query_server"))
   , reevaluate_server_(nh_.advertiseService("reevaluate", &STLAEPlanner::reevaluate, this))
   , best_node_client_(nh_.serviceClient<stl_aeplanner_msgs::BestNode>("best_node_server"))
   , current_state_initialized_(false)
-  , ot_(NULL)
+//  , ot_(NULL)
   , ltl_cs_(nh_)
   , ltl_path_pub_(nh_.advertise<nav_msgs::Path>("ltl_path", 1000))
   , ltl_stats_pub_(nh_.advertise<stl_aeplanner_msgs::LTLStats>("ltl_stats", 1000))
   , ltl_iterations_(0)
+  , ufomap_(0.2)
+  , ufomap_viz_(nh_)
 {
   // Set up dynamic reconfigure server
   ltl_f_ = boost::bind(&STLAEPlanner::configCallback, this, _1, _2);
@@ -42,7 +47,7 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
 
 void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
+  //std::shared_ptr<octomap::OcTree> ot = ot_;
   Eigen::Vector4d current_state = current_state_;
 
   ROS_ERROR_STREAM("Execute start!");
@@ -56,29 +61,29 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
     as_.setSucceeded(result);
     return;
   }
-  if (!ot)
+  if (0 == ufomap_.getNumLeafNodes())
   {
     ROS_WARN("No octomap received");
     as_.setSucceeded(result);
     return;
   }
 
-  octomap::point3d min(current_state[0] - params_.max_sampling_radius - ltl_max_search_distance_,
+  ufomap::Point3d min(current_state[0] - params_.max_sampling_radius - ltl_max_search_distance_,
                        current_state[1] - params_.max_sampling_radius - ltl_max_search_distance_,
                        current_state[2] - params_.max_sampling_radius - ltl_max_search_distance_);
 
-  octomap::point3d max(current_state[0] + params_.max_sampling_radius + ltl_max_search_distance_,
+  ufomap::Point3d max(current_state[0] + params_.max_sampling_radius + ltl_max_search_distance_,
                        current_state[1] + params_.max_sampling_radius + ltl_max_search_distance_,
                        current_state[2] + params_.max_sampling_radius + ltl_max_search_distance_);
 
-  std::shared_ptr<point_rtree> stl_rtree = std::make_shared<point_rtree>(getRtree(ot, min, max));
+  std::shared_ptr<point_rtree> stl_rtree = std::make_shared<point_rtree>(getRtreeUfomap(min, max));
 
   value_rtree rtree;
 
   ROS_WARN("Init");
-  root_ = initialize(&rtree, current_state);
+  root_ = initialize(&rtree, stl_rtree, current_state);
   ROS_WARN("expandRRT");
-  expandRRT(ot, &rtree, stl_rtree, current_state);
+  expandRRTUfomap(&rtree, stl_rtree, current_state);
 
   ROS_WARN("getCopyOfParent");
   best_branch_root_ = best_node_->getCopyOfParentBranch();
@@ -109,36 +114,55 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
   as_.setSucceeded(result);
 }
 
-point_rtree STLAEPlanner::getRtree(std::shared_ptr<octomap::OcTree> ot, octomap::point3d min, octomap::point3d max)
+//point_rtree STLAEPlanner::getRtree(std::shared_ptr<octomap::OcTree> ot, octomap::point3d min, octomap::point3d max)
+//{
+//  point_rtree rtree;
+//  for (octomap::OcTree::leaf_bbx_iterator it = ot->begin_leafs_bbx(min, max), it_end = ot->end_leafs_bbx();
+//       it != it_end; ++it)
+//  {
+//    if (it->getLogOdds() > 0)
+//    {
+//      rtree.insert(point(it.getX(), it.getY(), it.getZ()));
+//    }
+//  }
+//
+//  return rtree;
+//}
+
+point_rtree STLAEPlanner::getRtreeUfomap(ufomap::Point3f min, ufomap::Point3f max)
 {
   point_rtree rtree;
-  for (octomap::OcTree::leaf_bbx_iterator it = ot->begin_leafs_bbx(min, max), it_end = ot->end_leafs_bbx();
-       it != it_end; ++it)
+  ufomap_mutex_.lock();
+  for(auto it = ufomap_.begin_leafs_bbx(min, max); it != ufomap_.end_leafs_bbx(); ++it) 
   {
-    if (it->getLogOdds() > 0)
+    //if (it.isFree()) // TODO this is right right?
+    if (it.isOccupied()) // TODO this is right right?
     {
       rtree.insert(point(it.getX(), it.getY(), it.getZ()));
     }
   }
+  ufomap_mutex_.unlock();
 
   return rtree;
 }
 
-std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree, const Eigen::Vector4d& current_state)
+std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree, 
+                                                    std::shared_ptr<point_rtree> stl_rtree,
+                                                    const Eigen::Vector4d& current_state)
 {
   best_node_ = nullptr;
   std::shared_ptr<RRTNode> root;
-
-  if (best_branch_root_)
+  if (best_branch_root_ and !best_branch_root_->children_.empty())
   {
     // Initialize with previous best branch
 
     // Discard root node from tree since we just were there...
+    
     root = best_branch_root_->children_[0];
     root->parent_ = NULL;
     best_branch_root_->children_.clear();
 
-    initializeKDTreeWithPreviousBestBranch(rtree, root);
+    initializeKDTreeWithPreviousBestBranch(rtree,stl_rtree, root);
     reevaluatePotentialInformationGainRecursive(root);
   }
   else
@@ -154,21 +178,31 @@ std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree, const Eige
   return root;
 }
 
-void STLAEPlanner::initializeKDTreeWithPreviousBestBranch(value_rtree* rtree, std::shared_ptr<RRTNode> root)
+void STLAEPlanner::initializeKDTreeWithPreviousBestBranch(value_rtree* rtree, 
+                                                            std::shared_ptr<point_rtree> stl_rtree, 
+                                                            std::shared_ptr<RRTNode> root)
 {
   std::shared_ptr<RRTNode> current_node = root;
+  std::shared_ptr<RRTNode> next_node;
   do
   {
     rtree->insert(
         std::make_pair(point(current_node->state_[0], current_node->state_[1], current_node->state_[2]), current_node));
-    if (!current_node->children_.empty())
-      current_node = current_node->children_[0];
+
+    if (!current_node->children_.empty()){
+        next_node = current_node->children_[0];
+        if (collisionLine(stl_rtree, current_node->state_, next_node->state_, params_.bounding_radius)){
+            break;
+        }
+        current_node = next_node;
+    }
+
   } while (!current_node->children_.empty());
 }
 
 void STLAEPlanner::reevaluatePotentialInformationGainRecursive(std::shared_ptr<RRTNode> node)
 {
-  std::pair<double, double> ret = gainCubature(node->state_);
+  std::pair<double, double> ret = gainCubatureUfomap(node->state_);
   node->state_[3] = ret.second;  // Assign yaw angle that maximizes g
   node->gain_ = ret.first;
   for (typename std::vector<std::shared_ptr<RRTNode>>::iterator node_it = node->children_.begin();
@@ -176,8 +210,9 @@ void STLAEPlanner::reevaluatePotentialInformationGainRecursive(std::shared_ptr<R
     reevaluatePotentialInformationGainRecursive(*node_it);
 }
 
-void STLAEPlanner::expandRRT(std::shared_ptr<octomap::OcTree> ot, value_rtree* rtree,
-                             std::shared_ptr<point_rtree> stl_rtree, const Eigen::Vector4d& current_state)
+void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
+                                 std::shared_ptr<point_rtree> stl_rtree,
+                                 const Eigen::Vector4d& current_state)
 {
   // Expand an RRT tree and calculate information gain in every node
   for (int n = 0;
@@ -192,26 +227,28 @@ void STLAEPlanner::expandRRT(std::shared_ptr<octomap::OcTree> ot, value_rtree* r
   {
     std::shared_ptr<RRTNode> new_node = std::make_shared<RRTNode>();
     std::shared_ptr<RRTNode> nearest;
-    octomap::OcTreeNode* ot_result;
+    const ufomap::OccupancyNode* ot_result;
 
     // Sample new point around agent and check that
     // (1) it is within the boundaries
     // (2) it is in known space
-    // (3) the path between the new node and it's parent does not contain any
+    // (3) the path between the new node and it')s parent does not contain any
     // obstacles
-
     do
     {
       Eigen::Vector4d offset = sampleNewPoint();
       new_node->state_ = current_state + offset;
       nearest = chooseParent(*rtree, stl_rtree, new_node, params_.extension_range);
       new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
-      ot_result = ot->search(octomap::point3d(new_node->state_[0], new_node->state_[1], new_node->state_[2]));
-      if (ot_result == NULL)
+      //ufomap_mutex_.lock();
+      ot_result = ufomap_.search(ufomap::Point3f(new_node->state_[0], new_node->state_[1], new_node->state_[2]));
+      //ufomap_mutex_.unlock();
+      if (ot_result == NULL){
         continue;
-      
-    } while (!isInsideBoundaries(new_node->state_) or !ot_result or
+      }
+    } while (!isInsideBoundaries(new_node->state_) or (!ot_result or !ufomap_.isFree(*ot_result)) or
              collisionLine(stl_rtree, nearest->state_, new_node->state_, params_.bounding_radius));
+
 
     // new_node is now ready to be added to tree
     new_node->parent_ = nearest;
@@ -237,6 +274,7 @@ void STLAEPlanner::expandRRT(std::shared_ptr<octomap::OcTree> ot, value_rtree* r
                               ltl_step_size_, ltl_routers_, ltl_routers_active_, params_.lambda, ltl_min_altitude_,
                               ltl_max_altitude_, ltl_min_altitude_active_, ltl_max_altitude_active_))
       best_node_ = new_node;
+
   }
 }
 
@@ -361,7 +399,7 @@ std::pair<double, double> STLAEPlanner::getGain(std::shared_ptr<RRTNode> node)
 
   if (gp_query_client_.call(srv))
   {
-    if (srv.response.sigma < params_.sigma_thresh)
+    if (srv.response.sigma < params_.sigma_thresh) // TODO: Figure out what this is
     {
       double gain = srv.response.mu;
       double yaw = srv.response.yaw;
@@ -370,7 +408,7 @@ std::pair<double, double> STLAEPlanner::getGain(std::shared_ptr<RRTNode> node)
   }
 
   node->gain_explicitly_calculated_ = true;
-  return gainCubature(node->state_);
+  return gainCubatureUfomap(node->state_);
 }
 
 bool STLAEPlanner::reevaluate(stl_aeplanner_msgs::Reevaluate::Request& req,
@@ -379,7 +417,7 @@ bool STLAEPlanner::reevaluate(stl_aeplanner_msgs::Reevaluate::Request& req,
   for (std::vector<geometry_msgs::Point>::iterator it = req.point.begin(); it != req.point.end(); ++it)
   {
     Eigen::Vector4d pos(it->x, it->y, it->z, 0);
-    std::pair<double, double> gain_response = gainCubature(pos);
+    std::pair<double, double> gain_response = gainCubatureUfomap(pos);
     res.gain.push_back(gain_response.first);
     res.yaw.push_back(gain_response.second);
   }
@@ -387,13 +425,11 @@ bool STLAEPlanner::reevaluate(stl_aeplanner_msgs::Reevaluate::Request& req,
   return true;
 }
 
-std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
+std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state)
 {
-  std::shared_ptr<octomap::OcTree> ot = ot_;
-
   double gain = 0.0;
 
-  // This function computes the gain
+  // This function computes the gain using ufomap
   double fov_y = params_.hfov, fov_p = params_.vfov;
 
   double dr = params_.dr, dphi = params_.dphi, dtheta = params_.dtheta;
@@ -407,6 +443,7 @@ std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
   Eigen::Vector3d origin(state[0], state[1], state[2]);
   Eigen::Vector3d vec, dir;
 
+  //ufomap_mutex_.lock();
   for (theta = -180; theta < 180; theta += dtheta)
   {
     theta_rad = M_PI * theta / 180.0f;
@@ -414,7 +451,10 @@ std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
     {
       phi_rad = M_PI * phi / 180.0f;
 
-      double g = 0;
+      double g_unknwn = 0;
+      double g_dyn_occ = 0;
+      double g_dyn_free = 0;
+      double g_last_obs = 0;
       for (r = params_.r_min; r < params_.r_max; r += dr)
       {
         vec[0] = state[0] + r * cos(theta_rad) * sin(phi_rad);
@@ -422,27 +462,34 @@ std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
         vec[2] = state[2] + r * cos(phi_rad);
         dir = vec - origin;
 
-        octomap::point3d query(vec[0], vec[1], vec[2]);
-        octomap::OcTreeNode* result = ot->search(query);
+        ufomap::Point3f query(vec[0], vec[1], vec[2]);
+        const ufomap::OccupancyNode* result = ufomap_.search(query);
 
         Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
         if (!isInsideBoundaries(v))
           break;
         if (result)
         {
-          // Break if occupied so we don't count any information gain behind a wall.
-          if (result->getLogOdds() > 0)
-            break;
+          if (ufomap_.isUnknown(*result)){
+            g_unknwn += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
+          }
+          else {
+            if (ufomap_.isOccupied(*result)){
+            g_dyn_occ += result->p_exit;
+            break; // Break if occupied so we don't count any information gain behind a wall.
+            }
+            if (ufomap_.isFree(*result)){
+              g_dyn_free += result->p_entry;
+            }
+            g_last_obs += session_no_ - result->session_last_seen;
+          } 
         }
-        else
-          g += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
       }
-
-      gain += g;
-      gain_per_yaw[theta] += g;
+      gain += g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
+      gain_per_yaw[theta] += g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
     }
   }
-
+  //ufomap_mutex_.unlock();
   int best_yaw = 0;
   double best_yaw_score = 0;
   for (int yaw = -180; yaw < 180; yaw++)
@@ -463,8 +510,8 @@ std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
       best_yaw_score = yaw_score;
       best_yaw = yaw;
     }
-  }
 
+  }
   double r_max = params_.r_max;
   double h_max = params_.hfov / M_PI * 180;
   double v_max = params_.vfov / M_PI * 180;
@@ -477,7 +524,6 @@ std::pair<double, double> STLAEPlanner::gainCubature(Eigen::Vector4d state)
   state[3] = yaw;
   return std::make_pair(gain, yaw);
 }
-
 geometry_msgs::PoseArray STLAEPlanner::getFrontiers()
 {
   geometry_msgs::PoseArray frontiers;
@@ -514,7 +560,13 @@ bool STLAEPlanner::isInsideBoundaries(Eigen::Vector3d point)
          point[2] > params_.boundary_min[2] and point[2] < params_.boundary_max[2];
 }
 
-bool STLAEPlanner::isInsideBoundaries(octomap::point3d point)
+//bool STLAEPlanner::isInsideBoundaries(octomap::point3d point)
+//{
+//  return point.x() > params_.boundary_min[0] and point.x() < params_.boundary_max[0] and
+//         point.y() > params_.boundary_min[1] and point.y() < params_.boundary_max[1] and
+//         point.z() > params_.boundary_min[2] and point.z() < params_.boundary_max[2];
+//}
+bool STLAEPlanner::isInsideBoundaries(ufomap::Point3f point)
 {
   return point.x() > params_.boundary_min[0] and point.x() < params_.boundary_max[0] and
          point.y() > params_.boundary_min[1] and point.y() < params_.boundary_max[1] and
@@ -524,8 +576,8 @@ bool STLAEPlanner::isInsideBoundaries(octomap::point3d point)
 bool STLAEPlanner::collisionLine(std::shared_ptr<point_rtree> stl_rtree, Eigen::Vector4d p1, Eigen::Vector4d p2,
                                  double r)
 {
-  octomap::point3d start(p1[0], p1[1], p1[2]);
-  octomap::point3d end(p2[0], p2[1], p2[2]);
+  ufomap::Point3f start(p1[0], p1[1], p1[2]);
+  ufomap::Point3f end(p2[0], p2[1], p2[2]);
 
   point bbx_min(std::min(p1[0], p2[0]) - r, std::min(p1[1], p2[1]) - r, std::min(p1[2], p2[2]) - r);
   point bbx_max(std::max(p1[0], p2[0]) + r, std::max(p1[1], p2[1]) + r, std::max(p1[2], p2[2]) + r);
@@ -534,12 +586,12 @@ bool STLAEPlanner::collisionLine(std::shared_ptr<point_rtree> stl_rtree, Eigen::
   std::vector<point> hits;
   stl_rtree->query(boost::geometry::index::intersects(query_box), std::back_inserter(hits));
 
-  double lsq = (end - start).norm_sq();
+  double lsq = (end - start).squaredNorm();
   double rsq = r * r;
 
   for (size_t i = 0; i < hits.size(); ++i)
   {
-    octomap::point3d pt(hits[i].get<0>(), hits[i].get<1>(), hits[i].get<2>());
+    ufomap::Point3f pt(hits[i].get<0>(), hits[i].get<1>(), hits[i].get<2>());
 
     if (CylTest_CapsFirst(start, end, lsq, rsq, pt) > 0 or (end - pt).norm() < r)
     {
@@ -550,13 +602,39 @@ bool STLAEPlanner::collisionLine(std::shared_ptr<point_rtree> stl_rtree, Eigen::
   return false;
 }
 
-void STLAEPlanner::octomapCallback(const octomap_msgs::Octomap& msg)
-{
-  octomap::AbstractOcTree* aot = octomap_msgs::msgToMap(msg);
-  octomap::OcTree* ot = (octomap::OcTree*)aot;
-  ot_ = std::make_shared<octomap::OcTree>(*ot);
+//void STLAEPlanner::octomapCallback(const octomap_msgs::Octomap& msg)
+//{
+//  octomap::AbstractOcTree* aot = octomap_msgs::msgToMap(msg);
+//  octomap::OcTree* ot = (octomap::OcTree*)aot;
+//  ot_ = std::make_shared<octomap::OcTree>(*ot);
+//
+//  delete ot;
+//}
 
-  delete ot;
+void STLAEPlanner::transformCallback(const geometry_msgs::TransformStamped::ConstPtr& msg)
+{
+    transform_ = *msg;  // TODO: Move this outside stl_aeplanner
+}
+
+void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud)
+{
+    ufomap::PointCloud ufo_cloud;
+    if (cloud->header.frame_id != "map") {
+        sensor_msgs::PointCloud2::Ptr transformed_cloud(new sensor_msgs::PointCloud2);
+        tf2::doTransform(*cloud, *transformed_cloud, transform_);
+        ufomap::toUfomap(transformed_cloud, &ufo_cloud);
+    }
+    else{
+        ufomap::toUfomap(cloud, &ufo_cloud);
+    }
+
+    ufomap::Point3f sensor_origin(transform_.transform.translation.x,
+                                transform_.transform.translation.y,
+                                transform_.transform.translation.z);
+    ufomap_mutex_.lock();
+	ufomap_.insertPointCloud(ufo_cloud, sensor_origin, ufomap_max_range_, 0, false, 0); // if virtual_camera topic is used, make sure that max range is less than the topics max range  
+    ufomap_viz_.standard_visualization(&ufomap_);
+    ufomap_mutex_.unlock();
 }
 
 void STLAEPlanner::publishEvaluatedNodesRecursive(std::shared_ptr<RRTNode> node)
@@ -619,7 +697,7 @@ void STLAEPlanner::agentPoseCallback(const geometry_msgs::PoseStamped& msg)
   }
 
   // Stats
-  if (ot_)
+  if (0 < ufomap_.getNumLeafNodes())
   {
     stl_aeplanner_msgs::LTLStats ltl_stats;
     ltl_stats.header.stamp = ros::Time::now();
@@ -630,15 +708,15 @@ void STLAEPlanner::agentPoseCallback(const geometry_msgs::PoseStamped& msg)
 
     Eigen::Vector3d position(current_state_[0], current_state_[1], current_state_[2]);
 
-    std::shared_ptr<octomap::OcTree> ot = ot_;
+    //std::shared_ptr<octomap::OcTree> ot = ot_;
 
-    octomap::point3d min(position[0] - ltl_max_search_distance_, position[1] - ltl_max_search_distance_,
+    ufomap::Point3d min(position[0] - ltl_max_search_distance_, position[1] - ltl_max_search_distance_,
                          position[2] - ltl_max_search_distance_);
 
-    octomap::point3d max(position[0] + ltl_max_search_distance_, position[1] + ltl_max_search_distance_,
+    ufomap::Point3d max(position[0] + ltl_max_search_distance_, position[1] + ltl_max_search_distance_,
                          position[2] + ltl_max_search_distance_);
 
-    std::shared_ptr<point_rtree> rtree = std::make_shared<point_rtree>(getRtree(ot, min, max));
+    std::shared_ptr<point_rtree> rtree = std::make_shared<point_rtree>(getRtreeUfomap(min, max));
 
     std::pair<double, double> closest_distance = RRTNode::getDistanceToClosestOccupiedBounded(
         rtree, position, position, ltl_max_search_distance_, params_.bounding_radius, ltl_step_size_);
@@ -737,8 +815,58 @@ geometry_msgs::Pose STLAEPlanner::vecToPose(Eigen::Vector4d state)
 // Return:  distance squared from cylinder axis if point is inside.
 //
 //-----------------------------------------------------------------------------
-float STLAEPlanner::CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2, float lsq, float rsq,
-                                      const octomap::point3d& pt)
+//float STLAEPlanner::CylTest_CapsFirst(const octomap::point3d& pt1, const octomap::point3d& pt2, float lsq, float rsq,
+//                                      const octomap::point3d& pt)
+//{
+//  float dx, dy, dz;     // vector d  from line segment point 1 to point 2
+//  float pdx, pdy, pdz;  // vector pd from point 1 to test point
+//  float dot, dsq;
+//
+//  dx = pt2.x() - pt1.x();  // translate so pt1 is origin.  Make vector from
+//  dy = pt2.y() - pt1.y();  // pt1 to pt2.  Need for this is easily eliminated
+//  dz = pt2.z() - pt1.z();
+//
+//  pdx = pt.x() - pt1.x();  // vector from pt1 to test point.
+//  pdy = pt.y() - pt1.y();
+//  pdz = pt.z() - pt1.z();
+//
+//  // Dot the d and pd vectors to see if point lies behind the
+//  // cylinder cap at pt1.x, pt1.y, pt1.z
+//
+//  dot = pdx * dx + pdy * dy + pdz * dz;
+//
+//  // If dot is less than zero the point is behind the pt1 cap.
+//  // If greater than the cylinder axis line segment length squared
+//  // then the point is outside the other end cap at pt2.
+//
+//  if (dot < 0.0f || dot > lsq)
+//    return (-1.0f);
+//  else
+//  {
+//    // Point lies within the parallel caps, so find
+//    // distance squared from point to line, using the fact that sin^2 + cos^2 = 1
+//    // the dot = cos() * |d||pd|, and cross*cross = sin^2 * |d|^2 * |pd|^2
+//    // Carefull: '*' means mult for scalars and dotproduct for vectors
+//    // In short, where dist is pt distance to cyl axis:
+//    // dist = sin( pd to d ) * |pd|
+//    // distsq = dsq = (1 - cos^2( pd to d)) * |pd|^2
+//    // dsq = ( 1 - (pd * d)^2 / (|pd|^2 * |d|^2) ) * |pd|^2
+//    // dsq = pd * pd - dot * dot / lengthsq
+//    //  where lengthsq is d*d or |d|^2 that is passed into this function
+//
+//    // distance squared to the cylinder axis:
+//
+//    dsq = (pdx * pdx + pdy * pdy + pdz * pdz) - dot * dot / lsq;
+//
+//    if (dsq > rsq)
+//      return (-1.0f);
+//    else
+//      return (dsq);  // return distance squared to axis
+//  }
+//}
+
+float STLAEPlanner::CylTest_CapsFirst(const ufomap::Point3d& pt1, const ufomap::Point3d& pt2, float lsq, float rsq,
+                                      const ufomap::Point3d& pt)
 {
   float dx, dy, dz;     // vector d  from line segment point 1 to point 2
   float pdx, pdy, pdz;  // vector pd from point 1 to test point
@@ -789,7 +917,7 @@ float STLAEPlanner::CylTest_CapsFirst(const octomap::point3d& pt1, const octomap
 
 struct
 {
-  bool operator()(const std::pair<octomap::point3d, double>& lhs, const std::pair<octomap::point3d, double>& rhs) const
+  bool operator()(const std::pair<ufomap::Point3d, double>& lhs, const std::pair<ufomap::Point3d, double>& rhs) const
   {
     return lhs.second < rhs.second;
   }
