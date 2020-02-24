@@ -84,7 +84,7 @@ target_link_libraries(stl_aeplanner
 add_dependencies(stl_aeplanner
   ${catkin_EXPORTED_TARGETS} 
   ${${PROJECT_NAME}_EXPORTED_TARGETS} 
-  stl_aeplanner_ref_generate_messages_cpp
+  #stl_aeplanner_ref_generate_messages_cpp
   ${PROJECT_NAME}_gencfg
 )
 
@@ -98,6 +98,6 @@ target_link_libraries(stl_aeplanner_node
 add_dependencies(stl_aeplanner_node
   ${catkin_EXPORTED_TARGETS} 
   ${${PROJECT_NAME}_EXPORTED_TARGETS} 
-  stl_aeplanner_ref_generate_messages_cpp
+  #stl_aeplanner_ref_generate_messages_cpp
   ${PROJECT_NAME}_gencfg
 )

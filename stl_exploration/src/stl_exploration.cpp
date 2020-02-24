@@ -144,19 +144,47 @@ int main(int argc, char** argv)
   // Start planning: The planner is called and the computed path sent to the
   // controller.
   int iteration = 0;
+  int session = 0;
   int actions_taken = 1;
 
+  bool back_home = false;
+
   ros::Time start = ros::Time::now();
+  ros::Time session_start = ros::Time::now();
+  ros::Duration session_length = ros::Duration(10);
   while (ros::ok())
   {
-    ROS_INFO_STREAM("Planning iteration " << iteration);
     stl_aeplanner_msgs::aeplannerGoal aep_goal;
     aep_goal.header.stamp = ros::Time::now();
     aep_goal.header.seq = iteration;
     aep_goal.header.frame_id = "map";
-    aep_goal.actions_taken = actions_taken;
+    if (!(session_length > ros::Time::now() - session_start))
+    {
+        //check and see if the drone is back home
+        if (!aep_ac.getResult()->at_home)
+        {
+            ROS_INFO("ex, Returning back home");
+            // Return back home
+            // Different behaviour in RRT node generation. First idea is to
+            // tweak expandRRT into a return home planner or something
+            aep_goal.session_done = true; // return home signal
+        }
+        else // at home
+        {
+            ROS_INFO("ex, Am back home");
+            // Update dynamic parameters in stl_aeplanner
+            // Start new session
+            ++ session;
+            session_start = ros::Time::now();
+        }
+    }
+    else 
+    {
+        // Session exploring
+        ROS_INFO_STREAM("Planning session " << session << ", iteration " << iteration);
+        aep_goal.session_done = false; // explore signal
+    }
     aep_ac.sendGoal(aep_goal);
-
     while (!aep_ac.waitForResult(ros::Duration(0.05)))
     {
       last_pose.header.stamp = ros::Time::now();

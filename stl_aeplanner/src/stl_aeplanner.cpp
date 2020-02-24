@@ -1,4 +1,4 @@
-#include <stl_aeplanner/stl_aeplanner.h>
+#include <stl_aeplanner/stl_aeplanner.h> 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
 
@@ -42,6 +42,8 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   params_ = readParams();
   max_sampling_radius_squared_ = pow(params_.max_sampling_radius, 2.0);
 
+  home_pose_v4[0] = 0; home_pose_v4[1] = 0; 
+  home_pose_v4[2] = 1; home_pose_v4[4] = 0; 
   as_.start();
 }
 
@@ -83,7 +85,34 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
   ROS_WARN("Init");
   root_ = initialize(&rtree, stl_rtree, current_state);
   ROS_WARN("expandRRT");
-  expandRRTUfomap(&rtree, stl_rtree, current_state);
+  if (!goal->session_done){ // explore
+      expandRRTUfomap(&rtree, stl_rtree, current_state);
+  }
+  if (goal->session_done){ // return home
+      Eigen::Vector4d dist_to_home_4 = current_state - home_pose_v4;
+      Eigen::Vector3d dist_to_home_3(dist_to_home_4[0],
+                                        dist_to_home_4[1],
+                                        dist_to_home_4[2]);
+      if (dist_to_home_3.norm() < 1.3*params_.extension_range){ // Update dynamic parameters here
+          ROS_INFO("Returned back home, updating dynamic parameters");
+          ++ session_number_;
+          ufomap_mutex_.lock();
+          ufomap_.update_dynamic_parameters(session_number_);
+          ufomap_mutex_.unlock();
+
+          going_home_ = false;
+          result.at_home = true;
+          ros::Duration(2).sleep();
+          best_node_ = nullptr;
+          expandRRTUfomap(&rtree, stl_rtree, current_state);
+      }
+      else
+      {
+      going_home_ = true;
+      ROS_INFO("stl_aeplanner, going back home");
+      planToGoalRRT(&rtree, stl_rtree, current_state);
+      }
+  }
 
   ROS_WARN("getCopyOfParent");
   best_branch_root_ = best_node_->getCopyOfParentBranch();
@@ -151,6 +180,7 @@ std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree,
                                                     const Eigen::Vector4d& current_state)
 {
   best_node_ = nullptr;
+
   std::shared_ptr<RRTNode> root;
   if (best_branch_root_ and !best_branch_root_->children_.empty())
   {
@@ -161,6 +191,11 @@ std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree,
     root = best_branch_root_->children_[0];
     root->parent_ = NULL;
     best_branch_root_->children_.clear();
+    if (going_home_)
+    {
+        initializeKDTreeWithPreviousBestBranch(rtree,stl_rtree, root);
+        return root;
+    }
 
     initializeKDTreeWithPreviousBestBranch(rtree,stl_rtree, root);
     reevaluatePotentialInformationGainRecursive(root);
@@ -174,7 +209,6 @@ std::shared_ptr<RRTNode> STLAEPlanner::initialize(value_rtree* rtree,
     root->state_[2] = current_state[2];
     rtree->insert(std::make_pair(point(root->state_[0], root->state_[1], root->state_[2]), root));
   }
-
   return root;
 }
 
@@ -192,6 +226,7 @@ void STLAEPlanner::initializeKDTreeWithPreviousBestBranch(value_rtree* rtree,
     if (!current_node->children_.empty()){
         next_node = current_node->children_[0];
         if (collisionLine(stl_rtree, current_node->state_, next_node->state_, params_.bounding_radius)){
+            //ROS_INFO("stl_aeplanner, break best branch");
             break;
         }
         current_node = next_node;
@@ -208,6 +243,82 @@ void STLAEPlanner::reevaluatePotentialInformationGainRecursive(std::shared_ptr<R
   for (typename std::vector<std::shared_ptr<RRTNode>>::iterator node_it = node->children_.begin();
        node_it != node->children_.end(); ++node_it)
     reevaluatePotentialInformationGainRecursive(*node_it);
+}
+
+void STLAEPlanner::planToGoalRRT(value_rtree* rtree,
+                                 std::shared_ptr<point_rtree> stl_rtree,
+                                 const Eigen::Vector4d& current_state)
+{
+  // Expand an RRT tree and calculate information gain in every node
+  int max_it = 3000;
+  for (int n = 0;
+       (n < max_it) and ros::ok();
+       ++n)
+  {
+    std::shared_ptr<RRTNode> new_node = std::make_shared<RRTNode>();
+    std::shared_ptr<RRTNode> nearest;
+    const ufomap::OccupancyNode* ot_result;
+
+    // Sample new point around agent and check that
+    // Don't need this check here, (1) it is within the boundaries
+    // (2) it is in known space
+    // (3) the path between the new node and it')s parent does not contain any
+    // obstacles
+    do
+    {
+      Eigen::Vector4d offset;
+          if (rand()%100 < 20)
+          {
+               offset = sampleNewPoint();
+          }
+          else
+          {
+               offset = home_pose_v4;
+          }
+      new_node->state_ = current_state + offset;
+      nearest = chooseParent(*rtree, stl_rtree, new_node, params_.extension_range);
+      new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
+      //ufomap_mutex_.lock();
+      ot_result = ufomap_.search(ufomap::Point3f(new_node->state_[0], new_node->state_[1], new_node->state_[2]));
+      //ufomap_mutex_.unlock();
+      if (ot_result == NULL){
+        continue;
+      }
+    } while ((!ot_result or !ufomap_.isFree(*ot_result)) or
+             collisionLine(stl_rtree, nearest->state_, new_node->state_, params_.bounding_radius));
+
+
+    // new_node is now ready to be added to tree
+    new_node->parent_ = nearest;
+    nearest->children_.push_back(new_node);
+
+    // rewire tree with new node
+    rewire(*rtree, stl_rtree, new_node, params_.extension_range, params_.bounding_radius, params_.d_overshoot_);
+
+    // Calculate potential information gain for new_node
+    std::pair<double, double> ret = getGain(new_node);
+    new_node->state_[3] = ret.second;  // Assign yaw angle that maximizes g
+    new_node->gain_ = ret.first;
+    rtree->insert(std::make_pair(point(new_node->state_[0], new_node->state_[1], new_node->state_[2]), new_node));
+
+    // Update best node
+    
+      Eigen::Vector3d home_pose_v3(home_pose_v4[0],
+                                        home_pose_v4[1],
+                                        home_pose_v4[2]);
+      Eigen::Vector3d state_v3(new_node->state_[0],
+                                new_node->state_[1],
+                                new_node->state_[2]);
+      Eigen::Vector3d dist_to_home = home_pose_v3 - state_v3;
+      if (dist_to_home.norm() < 1.3*params_.extension_range)
+      {
+          best_node_ = new_node;
+          ROS_INFO("stl_aeplanner, path home found");
+          break;
+      }
+      if (max_it == n)
+          ROS_ERROR_STREAM("No path home found");
+  }
 }
 
 void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
@@ -236,7 +347,22 @@ void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
     // obstacles
     do
     {
-      Eigen::Vector4d offset = sampleNewPoint();
+      Eigen::Vector4d offset;
+      if (going_home_)
+      {
+          if (rand()%100 < 20)
+          {
+               offset = sampleNewPoint();
+          }
+          else
+          {
+               offset = home_pose_v4;
+          }
+      }
+      if (!going_home_)
+      {
+           offset = sampleNewPoint();
+      }
       new_node->state_ = current_state + offset;
       nearest = chooseParent(*rtree, stl_rtree, new_node, params_.extension_range);
       new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
@@ -437,6 +563,7 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
   double r;
   int phi, theta;
   double phi_rad, theta_rad;
+  double dV = 0;
 
   std::map<int, double> gain_per_yaw;
 
@@ -451,10 +578,7 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
     {
       phi_rad = M_PI * phi / 180.0f;
 
-      double g_unknwn = 0;
-      double g_dyn_occ = 0;
-      double g_dyn_free = 0;
-      double g_last_obs = 0;
+      double gain_yaw = 0;
       for (r = params_.r_min; r < params_.r_max; r += dr)
       {
         vec[0] = state[0] + r * cos(theta_rad) * sin(phi_rad);
@@ -470,23 +594,15 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
           break;
         if (result)
         {
-          if (ufomap_.isUnknown(*result)){
-            g_unknwn += (2 * r * r * dr + 1 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2);
-          }
-          else {
-            if (ufomap_.isOccupied(*result)){
-            g_dyn_occ += result->p_exit;
-            break; // Break if occupied so we don't count any information gain behind a wall.
-            }
-            if (ufomap_.isFree(*result)){
-              g_dyn_free += result->p_entry;
-            }
-            g_last_obs += session_no_ - result->session_last_seen;
-          } 
+        dV = (2 * r * r * dr + 1.0 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2); // volume of volumeelement + some discretization term
+        gain_yaw += gain_function(&ufomap_, result, session_number_, dV);
+        if (ufomap_.isOccupied(*result)){
+          break; // Break if occupied so we don't count any information gain behind a wall.
+        }
         }
       }
-      gain += g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
-      gain_per_yaw[theta] += g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
+      gain += gain_yaw;
+      gain_per_yaw[theta] += gain_yaw;
     }
   }
   //ufomap_mutex_.unlock();
@@ -524,6 +640,28 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
   state[3] = yaw;
   return std::make_pair(gain, yaw);
 }
+
+double STLAEPlanner::gain_function(const ufomap::Octree* ufomap, const ufomap::OccupancyNode* node, int session_number, double dV = 1)  // Outside of class to in order to be accessible to ufomap_visualization
+{
+  double g_unknwn = 0;
+  double g_dyn_occ = 0;
+  double g_dyn_free = 0;
+  double g_last_obs = 0;
+  double gain = 0;
+  if (ufomap->isOccupied(*node)){
+    g_dyn_occ += node->p_exit * dV;
+  }
+  if (ufomap->isUnknown(*node)){
+    g_unknwn += dV;
+  }
+  if (ufomap->isFree(*node)){  // Search if there are any occupied space close to this node, discard it if to minimize the impact of noise
+    g_dyn_free += node->p_entry * dV;
+  }
+  g_last_obs += (session_number - node->session_last_seen) * dV;
+  gain = g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
+  return gain;
+}
+
 geometry_msgs::PoseArray STLAEPlanner::getFrontiers()
 {
   geometry_msgs::PoseArray frontiers;
@@ -631,10 +769,13 @@ void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& clou
     ufomap::Point3f sensor_origin(transform_.transform.translation.x,
                                 transform_.transform.translation.y,
                                 transform_.transform.translation.z);
-    ufomap_mutex_.lock();
-	ufomap_.insertPointCloud(ufo_cloud, sensor_origin, ufomap_max_range_, 0, false, 0); // if virtual_camera topic is used, make sure that max range is less than the topics max range  
-    ufomap_viz_.standard_visualization(&ufomap_);
-    ufomap_mutex_.unlock();
+    //ufomap_mutex_.lock();
+    {
+        const std::lock_guard<std::mutex> lock(ufomap_mutex_);
+        ufomap_.insertPointCloud(ufo_cloud, sensor_origin, ufomap_max_range_, 0, false, 0); // if virtual_camera topic is used, make sure that max range is less than the topics max range  
+        ufomap_viz_.standard_visualization(&ufomap_, session_number_, STLAEPlanner::gain_function);
+    }
+    //ufomap_mutex_.unlock();
 }
 
 void STLAEPlanner::publishEvaluatedNodesRecursive(std::shared_ptr<RRTNode> node)

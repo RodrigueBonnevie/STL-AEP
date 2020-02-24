@@ -44,6 +44,7 @@
 
 namespace stl_aeplanner
 {
+
 typedef std::pair<point, std::shared_ptr<RRTNode>> value;
 typedef boost::geometry::index::rtree<value, boost::geometry::index::rstar<16>> value_rtree;
 
@@ -67,11 +68,14 @@ private:
   //std::shared_ptr<octomap::OcTree> ot_;
 
   // Ufomap with dynamic parameters
-  int session_no_ = 0;
+  int session_number_ = 0;
   double ufomap_max_range_ = 7;
   ufomap::Octree ufomap_;  
   std::mutex ufomap_mutex_;
   geometry_msgs::TransformStamped transform_;  // Ros transform for pointcloud to ufomap
+  Eigen::Vector4d home_pose_v4; 
+
+  bool going_home_ = false;
   
   // Subscribers
 //  ros::Subscriber octomap_sub_;
@@ -152,6 +156,7 @@ private:
 
   std::pair<double, double> getGain(std::shared_ptr<RRTNode> node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
+  static double gain_function(const ufomap::Octree*, const ufomap::OccupancyNode* node, int session_number, double dV);
 
   // ---------------- Helpers ----------------
   //
@@ -186,6 +191,9 @@ public:
   void ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
   point_rtree getRtreeUfomap(ufomap::Point3f min, ufomap::Point3f max);
   std::pair<double, double> gainCubatureUfomap(Eigen::Vector4d state);
+  void planToGoalRRT(value_rtree* rtree,
+                                 std::shared_ptr<point_rtree> stl_rtree,
+                                 const Eigen::Vector4d& current_state);
   void expandRRTUfomap(value_rtree* rtree,
                                  std::shared_ptr<point_rtree> stl_rtree,
                                  const Eigen::Vector4d& current_state);
