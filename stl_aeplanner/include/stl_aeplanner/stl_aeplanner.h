@@ -42,6 +42,9 @@
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
 #include <mutex>
 
+#include <thesis/spawn_n_delete_objects.h>
+#include <thesis/evaluate_dynamic_map.h>
+
 namespace stl_aeplanner
 {
 
@@ -74,6 +77,7 @@ private:
   std::mutex ufomap_mutex_;
   geometry_msgs::TransformStamped transform_;  // Ros transform for pointcloud to ufomap
   Eigen::Vector4d home_pose_v4; 
+  objects::Session_manager session_manager_;
 
   bool going_home_ = false;
   

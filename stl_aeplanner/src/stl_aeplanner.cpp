@@ -34,6 +34,7 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   , ltl_iterations_(0)
   , ufomap_(0.2)
   , ufomap_viz_(nh_)
+  , session_manager_(nh_)
 {
   // Set up dynamic reconfigure server
   ltl_f_ = boost::bind(&STLAEPlanner::configCallback, this, _1, _2);
@@ -91,15 +92,16 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
   if (goal->session_done){ // return home
       Eigen::Vector4d dist_to_home_4 = current_state - home_pose_v4;
       Eigen::Vector3d dist_to_home_3(dist_to_home_4[0],
-                                        dist_to_home_4[1],
-                                        dist_to_home_4[2]);
+                                      dist_to_home_4[1],
+                                      dist_to_home_4[2]);
       if (dist_to_home_3.norm() < 1.3*params_.extension_range){ // Update dynamic parameters here
           ROS_INFO("Returned back home, updating dynamic parameters");
           ++ session_number_;
           ufomap_mutex_.lock();
           ufomap_.update_dynamic_parameters(session_number_);
+          evaluate::evaluate_dynamic_map(&ufomap_, session_manager_.dynamic_models_);
           ufomap_mutex_.unlock();
-
+          session_manager_.refurnish();
           going_home_ = false;
           result.at_home = true;
           ros::Duration(2).sleep();
@@ -108,13 +110,16 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
       }
       else
       {
-      going_home_ = true;
-      ROS_INFO("stl_aeplanner, going back home");
-      planToGoalRRT(&rtree, stl_rtree, current_state);
+          going_home_ = true;
+          ROS_INFO("stl_aeplanner, going back home");
+          planToGoalRRT(&rtree, stl_rtree, current_state);
       }
   }
 
   ROS_WARN("getCopyOfParent");
+  if (!best_node_){
+    ROS_ERROR("Best node is nullptr");
+  }
   best_branch_root_ = best_node_->getCopyOfParentBranch();
 
   ROS_WARN("createRRTMarker");
@@ -269,11 +274,11 @@ void STLAEPlanner::planToGoalRRT(value_rtree* rtree,
       Eigen::Vector4d offset;
           if (rand()%100 < 20)
           {
-               offset = sampleNewPoint();
+              offset = sampleNewPoint();
           }
           else
           {
-               offset = home_pose_v4;
+              offset = home_pose_v4 - current_state;
           }
       new_node->state_ = current_state + offset;
       nearest = chooseParent(*rtree, stl_rtree, new_node, params_.extension_range);
@@ -284,9 +289,8 @@ void STLAEPlanner::planToGoalRRT(value_rtree* rtree,
       if (ot_result == NULL){
         continue;
       }
-    } while ((!ot_result or !ufomap_.isFree(*ot_result)) or
+    } while (!isInsideBoundaries(new_node->state_) or (!ot_result or !ufomap_.isFree(*ot_result)) or
              collisionLine(stl_rtree, nearest->state_, new_node->state_, params_.bounding_radius));
-
 
     // new_node is now ready to be added to tree
     new_node->parent_ = nearest;
@@ -310,13 +314,25 @@ void STLAEPlanner::planToGoalRRT(value_rtree* rtree,
                                 new_node->state_[1],
                                 new_node->state_[2]);
       Eigen::Vector3d dist_to_home = home_pose_v3 - state_v3;
+      // Update best node
+      if (!best_node_ or
+          new_node->score(stl_rtree, ltl_lambda_, ltl_min_distance_, ltl_max_distance_, ltl_min_distance_active_,
+                          ltl_max_distance_active_, ltl_max_search_distance_, params_.bounding_radius, ltl_step_size_,
+                          ltl_routers_, ltl_routers_active_, params_.lambda, ltl_min_altitude_, ltl_max_altitude_,
+                          ltl_min_altitude_active_, ltl_max_altitude_active_) >
+              best_node_->score(stl_rtree, ltl_lambda_, ltl_min_distance_, ltl_max_distance_, ltl_min_distance_active_,
+                                ltl_max_distance_active_, ltl_max_search_distance_, params_.bounding_radius,
+                                ltl_step_size_, ltl_routers_, ltl_routers_active_, params_.lambda, ltl_min_altitude_,
+                                ltl_max_altitude_, ltl_min_altitude_active_, ltl_max_altitude_active_)){
+        best_node_ = new_node; // in case no way home is found, the agent continues exploring
+      }
       if (dist_to_home.norm() < 1.3*params_.extension_range)
       {
           best_node_ = new_node;
           ROS_INFO("stl_aeplanner, path home found");
           break;
       }
-      if (max_it == n)
+      if (n == max_it -1) 
           ROS_ERROR_STREAM("No path home found");
   }
 }
@@ -348,21 +364,7 @@ void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
     do
     {
       Eigen::Vector4d offset;
-      if (going_home_)
-      {
-          if (rand()%100 < 20)
-          {
-               offset = sampleNewPoint();
-          }
-          else
-          {
-               offset = home_pose_v4;
-          }
-      }
-      if (!going_home_)
-      {
-           offset = sampleNewPoint();
-      }
+      offset = sampleNewPoint();
       new_node->state_ = current_state + offset;
       nearest = chooseParent(*rtree, stl_rtree, new_node, params_.extension_range);
       new_node->state_ = restrictDistance(nearest->state_, new_node->state_);
@@ -374,7 +376,6 @@ void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
       }
     } while (!isInsideBoundaries(new_node->state_) or (!ot_result or !ufomap_.isFree(*ot_result)) or
              collisionLine(stl_rtree, nearest->state_, new_node->state_, params_.bounding_radius));
-
 
     // new_node is now ready to be added to tree
     new_node->parent_ = nearest;
@@ -398,9 +399,9 @@ void STLAEPlanner::expandRRTUfomap(value_rtree* rtree,
             best_node_->score(stl_rtree, ltl_lambda_, ltl_min_distance_, ltl_max_distance_, ltl_min_distance_active_,
                               ltl_max_distance_active_, ltl_max_search_distance_, params_.bounding_radius,
                               ltl_step_size_, ltl_routers_, ltl_routers_active_, params_.lambda, ltl_min_altitude_,
-                              ltl_max_altitude_, ltl_min_altitude_active_, ltl_max_altitude_active_))
+                              ltl_max_altitude_, ltl_min_altitude_active_, ltl_max_altitude_active_)){
       best_node_ = new_node;
-
+    }
   }
 }
 
@@ -564,6 +565,9 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
   int phi, theta;
   double phi_rad, theta_rad;
   double dV = 0;
+  double theta_bbx = 1*dtheta_rad * 1e-9;
+  double phi_bbx = 1*dphi_rad * 1e-9;
+  double r_bbx = 2*dr;
 
   std::map<int, double> gain_per_yaw;
 
@@ -592,13 +596,31 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
         Eigen::Vector4d v(vec[0], vec[1], vec[2], 0);
         if (!isInsideBoundaries(v))
           break;
-        if (result)
-        {
-        dV = (2 * r * r * dr + 1.0 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2); // volume of volumeelement + some discretization term
-        gain_yaw += gain_function(&ufomap_, result, session_number_, dV);
-        if (ufomap_.isOccupied(*result)){
-          break; // Break if occupied so we don't count any information gain behind a wall.
-        }
+        if (result) {
+          dV = (2 * r * r * dr + 1.0 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2); // volume of volumeelement + some discretization term
+            double r_infl = r + r_bbx;
+            bool break_r = false;
+            // inflation of occupies space to avoid counting dynamic gain due to noise close to occupied space, the iflation is conical and thus increases futher away from the agent
+            for (double theta_infl =  theta_rad - theta_bbx; theta_infl <= (theta_rad + theta_bbx); theta_infl += dtheta_rad){
+              for (double phi_infl =  phi_rad - phi_bbx; phi_infl <= (phi_rad + phi_bbx); phi_infl += dphi_rad){
+                vec[0] = state[0] + r_infl * cos(theta_infl) * sin(phi_infl);
+                vec[1] = state[1] + r_infl * sin(theta_infl) * sin(phi_infl);
+                vec[2] = state[2] + r_infl * cos(phi_infl);
+
+                ufomap::Point3f query(vec[0], vec[1], vec[2]);
+                const ufomap::OccupancyNode* result_infl = ufomap_.search(query);
+                if (result_infl){
+                  if (ufomap_.isOccupied(*result_infl)){
+                    gain_yaw += gain_function(&ufomap_, result_infl, session_number_, dV);
+                    break_r = true;
+                    break; // Break if occupied so we don't count any information gain behind or close to a wall.
+                  }
+                }
+              }
+              if (break_r){break;} // Break if occupied so we don't count any information gain behind or close to a wall.
+            }
+          if (break_r){break;} // Break if occupied so we don't count any information gain behind or close to a wall.
+          gain_yaw += gain_function(&ufomap_, result, session_number_, dV);
         }
       }
       gain += gain_yaw;
@@ -658,7 +680,7 @@ double STLAEPlanner::gain_function(const ufomap::Octree* ufomap, const ufomap::O
     g_dyn_free += node->p_entry * dV;
   }
   g_last_obs += (session_number - node->session_last_seen) * dV;
-  gain = g_unknwn + g_dyn_occ + g_dyn_free + g_last_obs;
+  gain = g_unknwn + g_dyn_occ + 1.0/20* g_dyn_free + 1.0/20*1.0/7*g_last_obs + g_last_obs;
   return gain;
 }
 
@@ -736,7 +758,6 @@ bool STLAEPlanner::collisionLine(std::shared_ptr<point_rtree> stl_rtree, Eigen::
       return true;
     }
   }
-
   return false;
 }
 
@@ -772,8 +793,11 @@ void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& clou
     //ufomap_mutex_.lock();
     {
         const std::lock_guard<std::mutex> lock(ufomap_mutex_);
+        //ROS_INFO("b4 insetion of pointcloud");
         ufomap_.insertPointCloud(ufo_cloud, sensor_origin, ufomap_max_range_, 0, false, 0); // if virtual_camera topic is used, make sure that max range is less than the topics max range  
+        //ROS_INFO("between insertion and viz");
         ufomap_viz_.standard_visualization(&ufomap_, session_number_, STLAEPlanner::gain_function);
+        //ROS_INFO("after viz");
     }
     //ufomap_mutex_.unlock();
 }

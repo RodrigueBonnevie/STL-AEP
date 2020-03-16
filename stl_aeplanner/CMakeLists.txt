@@ -21,6 +21,8 @@ find_package(catkin REQUIRED COMPONENTS
   ufomap
   ufomap_ros
   ufomap_visualization
+
+  thesis
 )
 find_package(cmake_modules REQUIRED)
 find_package(Eigen3 REQUIRED)
