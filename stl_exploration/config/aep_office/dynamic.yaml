@@ -1,6 +1,6 @@
 name: "aep_office/stl"
 volume_complete: 1.0
-time_limit: 1500
+time_limit: 2500
 
 camera/horizontal_fov: 115.0
 camera/vertical_fov: 60.0
@@ -17,7 +17,7 @@ aep/gain/r_max: 7 # should I keep this?
 aep/gain/zero: -1
 aep/gain/lambda: 0.5
 aep/gain/sigma_thresh: 0.2
-aep/tree/extension_range: 1.0
+aep/tree/extension_range: 1.5
 aep/tree/max_sampling_radius: 10
 aep/tree/initial_iterations: 100
 aep/tree/cutoff_iterations: 400
