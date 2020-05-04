@@ -1,6 +1,7 @@
 #include <stl_aeplanner/stl_aeplanner.h> 
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/utils.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 
 #include <stl_aeplanner_msgs/LTLStats.h>
 #include <numeric>
@@ -36,6 +37,7 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   , ufomap_viz_(nh_)
   , session_manager_(nh_)
 {
+  tfl_ = new tf2_ros::TransformListener(tfBuffer_);
   // Set up dynamic reconfigure server
   ltl_f_ = boost::bind(&STLAEPlanner::configCallback, this, _1, _2);
   ltl_cs_.setCallback(ltl_f_);
@@ -778,18 +780,44 @@ void STLAEPlanner::transformCallback(const geometry_msgs::TransformStamped::Cons
 void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud)
 {
     ufomap::PointCloud ufo_cloud;
+    geometry_msgs::TransformStamped transform;
     if (cloud->header.frame_id != "map") {
+        const char* destination_frame = "map";
+        const char* original_frame = cloud->header.frame_id.c_str();
+        //ROS_INFO("destination frame  = %s", destination_frame);
+        //ROS_INFO("original frame  = %s", original_frame);
+      try {
+        //bool cantf1 = tfListener_.waitForTransform(destination_frame, original_frame, cloud->header.stamp, ros::Duration(1));
+        //ROS_INFO("waitForTransform");
+        //bool canTransform = tfBuffer_.canTransform(destination_frame, original_frame, cloud->header.stamp);
+        //ROS_INFO("can transform 2 %d",canTransform);
+        //ROS_INFO("can transform 1 %d",cantf1);
+        //std::string s = tfBuffer_.allFramesAsString();
+        //ROS_INFO("All frames: %s", s.c_str());
+        
+        //tfBuffer_.waitForTransform("/base_link", "/map", ros::Time(0), ros::Duration(3.0));
+        transform = tfBuffer_.lookupTransform(destination_frame, 
+                original_frame,
+                cloud->header.stamp );
         sensor_msgs::PointCloud2::Ptr transformed_cloud(new sensor_msgs::PointCloud2);
-        tf2::doTransform(*cloud, *transformed_cloud, transform_);
+        //tfListener_.transformPointCloud("groda", *cloud, *transformed_cloud);
+        //tfListener_.transformPointCloud(destination_frame, transform, cloud->header.stamp, cloud, transformed_cloud);
+        tf2::doTransform(*cloud, *transformed_cloud, transform);
         ufomap::toUfomap(transformed_cloud, &ufo_cloud);
+      }
+        catch(tf::TransformException ex){
+            ROS_ERROR("%s",ex.what());
+            ros::Duration(1.0).sleep();
+            return;
+        }
     }
     else{
         ufomap::toUfomap(cloud, &ufo_cloud);
     }
 
-    ufomap::Point3f sensor_origin(transform_.transform.translation.x,
-                                transform_.transform.translation.y,
-                                transform_.transform.translation.z);
+    ufomap::Point3f sensor_origin(transform.transform.translation.x,
+                                transform.transform.translation.y,
+                                transform.transform.translation.z);
     //ufomap_mutex_.lock();
     {
         const std::lock_guard<std::mutex> lock(ufomap_mutex_);

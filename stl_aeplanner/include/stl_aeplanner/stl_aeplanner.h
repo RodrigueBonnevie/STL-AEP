@@ -37,9 +37,12 @@
 #include <ufomap/ufomap.h>
 #include <ufomap_ros/conversions.h>
 #include <ufomap_visualization/visualization.h>
+#include <tf2_ros/transform_listener.h>
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
+#include <tf2/buffer_core.h>
+
 #include <mutex>
 
 #include <thesis/spawn_n_delete_objects.h>
@@ -71,6 +74,9 @@ private:
   //std::shared_ptr<octomap::OcTree> ot_;
 
   // Ufomap with dynamic parameters
+  tf2::BufferCore tfBuffer_;
+  tf2_ros::TransformListener* tfl_;
+  tf::TransformListener tfListener_;
   int session_number_ = 0;
   double ufomap_max_range_ = 7;
   ufomap::Octree ufomap_;  
