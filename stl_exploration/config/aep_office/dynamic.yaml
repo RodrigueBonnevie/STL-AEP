@@ -17,9 +17,9 @@ aep/gain/r_max: 7 # should I keep this?
 aep/gain/zero: -1
 aep/gain/lambda: 0.5
 aep/gain/sigma_thresh: 0.2
-aep/tree/extension_range: 1.5
-aep/tree/max_sampling_radius: 10
-aep/tree/initial_iterations: 100
+aep/tree/extension_range: 2
+aep/tree/max_sampling_radius: 15
+aep/tree/initial_iterations: 150
 aep/tree/cutoff_iterations: 400
 
 rrt/min_nodes: 100
@@ -44,7 +44,7 @@ min_distance_active: false
 max_distance_active: false
 routers_active: false
 distance_add_path: 0.1
-max_search_distance: 10.0
+max_search_distance: 15.0
 step_size: 0.1
 min_altitude: 0.0
 max_altitude: 40.0

@@ -602,7 +602,7 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
           dV = (2 * r * r * dr + 1.0 / 6 * dr * dr * dr) * dtheta_rad * sin(phi_rad) * sin(dphi_rad / 2); // volume of volumeelement + some discretization term
             double r_infl = r + r_bbx;
             bool break_r = false;
-            // inflation of occupies space to avoid counting dynamic gain due to noise close to occupied space, the iflation is conical and thus increases futher away from the agent
+            // inflation of occupied space to avoid counting dynamic gain due to noise close to occupied space, the iflation is conical and thus increases futher away from the agent
             for (double theta_infl =  theta_rad - theta_bbx; theta_infl <= (theta_rad + theta_bbx); theta_infl += dtheta_rad){
               for (double phi_infl =  phi_rad - phi_bbx; phi_infl <= (phi_rad + phi_bbx); phi_infl += dphi_rad){
                 vec[0] = state[0] + r_infl * cos(theta_infl) * sin(phi_infl);
@@ -682,7 +682,7 @@ double STLAEPlanner::gain_function(const ufomap::Octree* ufomap, const ufomap::O
     g_dyn_free += node->p_entry * dV;
   }
   g_last_obs += (session_number - node->session_last_seen) * dV;
-  gain = g_unknwn + g_dyn_occ + 1.0/20* g_dyn_free + 1.0/20*1.0/7*g_last_obs + g_last_obs;
+  gain = g_unknwn + g_dyn_occ + 1.0/20* g_dyn_free + 1.0/20*1.0/20*1.0/7*g_last_obs; 
   return gain;
 }
 

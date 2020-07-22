@@ -151,7 +151,7 @@ int main(int argc, char** argv)
 
   ros::Time start = ros::Time::now();
   ros::Time session_start = ros::Time::now();
-  ros::Duration session_length = ros::Duration(50);
+  ros::Duration session_length = ros::Duration(20);
   while (ros::ok())
   {
     stl_aeplanner_msgs::aeplannerGoal aep_goal;
