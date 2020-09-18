@@ -1,6 +1,6 @@
 name: "aep_office/stl"
 volume_complete: 1.0
-time_limit: 2500
+time_limit: 1800 #2500
 
 camera/horizontal_fov: 115.0
 camera/vertical_fov: 60.0
@@ -9,7 +9,7 @@ raycast/dr:     0.1
 raycast/dphi:   10
 raycast/dtheta: 10
 
-system/bbx/r: 0.75
+system/bbx/r: 0.3
 system/bbx/overshoot: 0.25
 
 aep/gain/r_min: 0
@@ -17,10 +17,11 @@ aep/gain/r_max: 7 # should I keep this?
 aep/gain/zero: -1
 aep/gain/lambda: 0.5
 aep/gain/sigma_thresh: 0.2
-aep/tree/extension_range: 2
+aep/tree/extension_range: 1.5
 aep/tree/max_sampling_radius: 15
-aep/tree/initial_iterations: 150
-aep/tree/cutoff_iterations: 400
+aep/tree/initial_iterations: 500 # change this
+aep/tree/cutoff_iterations: 1000 # if gain is less than gain zero then it expands this many nodes
+
 
 rrt/min_nodes: 100
 rrt/max_nodes: 1000
@@ -34,8 +35,8 @@ world_frame: "map"
 
 # bounding box: necessary to limit the simulation 
 # scenario (smaller than actual gazebo scenario)
-boundary/min: [ -50.0,  -50.0, 0.2]
-boundary/max: [ 50.0,   50.0,  2.0]
+boundary/min: [ -13,  -9, 0.2]
+boundary/max: [ 3,   10,  2.0]
 
 lambda: 0.25
 min_distance: 1.2
@@ -50,3 +51,9 @@ min_altitude: 0.0
 max_altitude: 40.0
 min_altitude_active: false
 max_altitude_active: false
+
+#dynamic
+session_length: 30
+gainf_dyn: 2
+gainf_last_obs: 1
+reexplore_sess: 10

@@ -1,9 +1,18 @@
 <?xml version="1.0" ?>
 <launch>
   <arg name="path" default="aep_office/dynamic" />
-
   <arg name="param_file" default="$(find stl_exploration)/config/$(arg path).yaml" />
+  
+  <arg name="ufofilename" default="map" />
+  <param name="ufofilename" value="$(arg ufofilename)" />
 
+  <arg name="time_limit" default="1800" />
+  <arg name="session_length" default="20" />
+  <arg name="extension_range" default="3" />
+  <arg name="initial_iterations" default="450" />
+  <arg name="lambda" default="0.5" />
+  <arg name="gainf_dyn" default="1" />
+  <arg name="gainf_last_obs" default="1" />
 
   <group ns="stl_aeplanner">
     <node pkg="tf2_ros" type="static_transform_publisher" name="primesense_broadcaster" args="0.05 0 0.13 -1.57079633 0 -1.57079633 base_link camera_link" />
@@ -19,7 +28,17 @@
 
     <node name="stl_exploration" pkg="stl_exploration" type="stl_exploration" output="screen" />
     <rosparam command="load" file="$(arg param_file)" />
+
+    <!-- parameters for gridsearch in dynamic exploration -->
+    <rosparam param="time_limit" subst_value="True"> $(arg time_limit)</rosparam>
+    <rosparam param="session_length" subst_value="True"> $(arg session_length)</rosparam>
+    <rosparam param="aep/tree/extension_range" subst_value="True"> $(arg extension_range)</rosparam>
+    <rosparam param="aep/tree/initial_iterations" subst_value="True"> $(arg initial_iterations)</rosparam>
+    <rosparam param="aep/gain/lambda" subst_value="True"> $(arg lambda)</rosparam>
+    <rosparam param="gainf_dyn" subst_value="True"> $(arg gainf_dyn)</rosparam>
+    <rosparam param="gainf_last_obs" subst_value="True"> $(arg gainf_last_obs)</rosparam>
   </group>
+  
 
   <!-- Increase Mavros publishing frequency -->
   <!-- <node name="mavros_mavcmd" pkg="mavros" type="mavcmd" args="-n /mavros long 511 32 100000 0 0 0 0 0" /> -->
@@ -39,6 +58,7 @@ name="camera_manager" output="screen"/>
 
   <node pkg="stl_evaluation" type="stl_evaluation_node" name="stl_evaluation_node" output="screen" required="true">
     <rosparam command="load" file="$(arg param_file)" />
+    <rosparam param="time_limit" subst_value="True"> $(arg time_limit)</rosparam>
   </node>
 
 </launch>

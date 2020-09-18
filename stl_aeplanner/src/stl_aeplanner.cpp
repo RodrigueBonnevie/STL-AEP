@@ -27,6 +27,7 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   , gp_query_client_(nh_.serviceClient<stl_aeplanner_msgs::Query>("gp_query_server"))
   , reevaluate_server_(nh_.advertiseService("reevaluate", &STLAEPlanner::reevaluate, this))
   , best_node_client_(nh_.serviceClient<stl_aeplanner_msgs::BestNode>("best_node_server"))
+  , spawn_n_delete_client_(nh_.serviceClient<thesis::spawn_n_delete>("/thesis/dynamic_object_manager"))
   , current_state_initialized_(false)
 //  , ot_(NULL)
   , ltl_cs_(nh_)
@@ -35,7 +36,7 @@ STLAEPlanner::STLAEPlanner(const ros::NodeHandle& nh)
   , ltl_iterations_(0)
   , ufomap_(0.2)
   , ufomap_viz_(nh_)
-  , session_manager_(nh_)
+  //, session_manager_(nh_)
 {
   tfl_ = new tf2_ros::TransformListener(tfBuffer_);
   // Set up dynamic reconfigure server
@@ -96,19 +97,21 @@ void STLAEPlanner::execute(const stl_aeplanner_msgs::aeplannerGoalConstPtr& goal
       Eigen::Vector3d dist_to_home_3(dist_to_home_4[0],
                                       dist_to_home_4[1],
                                       dist_to_home_4[2]);
-      if (dist_to_home_3.norm() < 1.3*params_.extension_range){ // Update dynamic parameters here
+      if (dist_to_home_3.norm() < 0.6*params_.extension_range){ // Update dynamic parameters here
           ROS_INFO("Returned back home, updating dynamic parameters");
           ++ session_number_;
           ufomap_mutex_.lock();
           ufomap_.update_dynamic_parameters(session_number_);
-          evaluate::evaluate_dynamic_map(&ufomap_, session_manager_.dynamic_models_);
+          //evaluate::evaluate_dynamic_map(&ufomap_, session_manager_.dynamic_models_);
           ufomap_mutex_.unlock();
-          session_manager_.refurnish();
+          //session_manager_.refurnish();
           going_home_ = false;
           result.at_home = true;
           ros::Duration(2).sleep();
           best_node_ = nullptr;
           expandRRTUfomap(&rtree, stl_rtree, current_state);
+          thesis::spawn_n_delete srv;
+          ros::service::call("/thesis/dynamic_object_manager", srv);
       }
       else
       {
@@ -257,7 +260,7 @@ void STLAEPlanner::planToGoalRRT(value_rtree* rtree,
                                  const Eigen::Vector4d& current_state)
 {
   // Expand an RRT tree and calculate information gain in every node
-  int max_it = 3000;
+  int max_it = 2000;
   for (int n = 0;
        (n < max_it) and ros::ok();
        ++n)
@@ -557,10 +560,8 @@ bool STLAEPlanner::reevaluate(stl_aeplanner_msgs::Reevaluate::Request& req,
 std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state)
 {
   double gain = 0.0;
-
   // This function computes the gain using ufomap
   double fov_y = params_.hfov, fov_p = params_.vfov;
-
   double dr = params_.dr, dphi = params_.dphi, dtheta = params_.dtheta;
   double dphi_rad = M_PI * dphi / 180.0f, dtheta_rad = M_PI * dtheta / 180.0f;
   double r;
@@ -569,7 +570,7 @@ std::pair<double, double> STLAEPlanner::gainCubatureUfomap(Eigen::Vector4d state
   double dV = 0;
   double theta_bbx = 1*dtheta_rad * 1e-9;
   double phi_bbx = 1*dphi_rad * 1e-9;
-  double r_bbx = 2*dr;
+  double r_bbx = 4*dr;
 
   std::map<int, double> gain_per_yaw;
 
@@ -671,19 +672,64 @@ double STLAEPlanner::gain_function(const ufomap::Octree* ufomap, const ufomap::O
   double g_dyn_occ = 0;
   double g_dyn_free = 0;
   double g_last_obs = 0;
+  double last_obs = 0;
   double gain = 0;
-  if (ufomap->isOccupied(*node)){
-    g_dyn_occ += node->p_exit * dV;
+  if (node->session_last_seen == session_number_){
+    return gain; // No gain if this space has been observed this session.
   }
   if (ufomap->isUnknown(*node)){
     g_unknwn += dV;
   }
-  if (ufomap->isFree(*node)){  // Search if there are any occupied space close to this node, discard it if to minimize the impact of noise
-    g_dyn_free += node->p_entry * dV;
+  if (ufomap->isOccupied(*node)){
+    g_dyn_occ += node->p_exit * dV;
+    //g_last_obs += (session_number - node->session_last_seen) * dV;
+    last_obs = session_number - node->session_last_seen;
   }
-  g_last_obs += (session_number - node->session_last_seen) * dV;
-  gain = g_unknwn + g_dyn_occ + 1.0/20* g_dyn_free + 1.0/20*1.0/20*1.0/7*g_last_obs; 
+  if (ufomap->isFree(*node))
+  { // Search if there are any occupied space close to this node, discard it if to minimize the impact of noise
+    g_dyn_free += node->p_entry * dV;
+    //g_last_obs += (session_number - node->session_last_seen) * dV;
+    last_obs = session_number - node->session_last_seen;
+  }
+  // make it possible to flatten the sigmoid
+  g_last_obs = 1 / (1 + 1 / std::exp(0.5*(last_obs - 6)));  // sigmoid function, the magic number is a shift for how many sessions it is desired for the drone to explore the whole environment.
+  // fix the magic numbers in the gainfunction
+  double gamma = ufomap_.getResolution() / params_.r_max;  // weight factor that is depending on how many voxels there are in a ray in the fov
+//  g_dyn_occ = 0;
+//  g_unknwn = 0;
+  gain = g_unknwn + params_.gainf_dyn * (g_dyn_occ + gamma * g_dyn_free) + params_.gainf_last_obs * gamma * g_last_obs;
   return gain;
+}
+
+void STLAEPlanner::writeMap(std::string path)
+{
+  std::string file;
+  std::string ufofilename;
+  ros::param::get("/ufofilename", ufofilename);
+  file = path + ufofilename + "_" + std::to_string(session_number_) + ".ufomap";
+  std::ofstream ufofile;
+  ufofile.open(file);
+  ufomap_.writeData(ufofile);
+  ufofile.close();
+  std::cout << "Ufomap written in file " << file << std::endl;
+  writeParams2file(path, ufofilename);
+}
+
+void STLAEPlanner::writeParams2file(std::string path, std::string ufofilename)
+{
+  std::string file = path + "params/" + ufofilename + ".txt";
+  std::cout << file << std::endl;
+  std::ofstream paramfile;
+  paramfile.open(file);
+  paramfile << "number of sessions = " << session_number_ << std::endl;
+  paramfile << "session length = " << params_.session_length << std::endl;
+  paramfile << "extension length = " << params_.extension_range << std::endl;
+  paramfile << "sampling radius = " << params_.max_sampling_radius << std::endl;
+  paramfile << "lambda = " << params_.lambda << std::endl;
+  paramfile << "RRT iterations = " << params_.init_iterations << std::endl;
+  paramfile << "Gain, dynamic = " << params_.gainf_dyn << std::endl;
+  paramfile << "Gain, last observation = " << params_.gainf_last_obs << std::endl;
+  paramfile.close();
 }
 
 geometry_msgs::PoseArray STLAEPlanner::getFrontiers()
@@ -794,11 +840,10 @@ void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& clou
         //ROS_INFO("can transform 1 %d",cantf1);
         //std::string s = tfBuffer_.allFramesAsString();
         //ROS_INFO("All frames: %s", s.c_str());
-        
-        //tfBuffer_.waitForTransform("/base_link", "/map", ros::Time(0), ros::Duration(3.0));
-        transform = tfBuffer_.lookupTransform(destination_frame, 
-                original_frame,
-                cloud->header.stamp );
+        transform = tfBuffer_.lookupTransform(destination_frame,
+                                              original_frame,
+                                              cloud->header.stamp,
+                                              ros::Duration(0.5));
         sensor_msgs::PointCloud2::Ptr transformed_cloud(new sensor_msgs::PointCloud2);
         //tfListener_.transformPointCloud("groda", *cloud, *transformed_cloud);
         //tfListener_.transformPointCloud(destination_frame, transform, cloud->header.stamp, cloud, transformed_cloud);
@@ -806,6 +851,7 @@ void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& clou
         ufomap::toUfomap(transformed_cloud, &ufo_cloud);
       }
         catch(tf::TransformException ex){
+
             ROS_ERROR("%s",ex.what());
             ros::Duration(1.0).sleep();
             return;
@@ -824,7 +870,7 @@ void STLAEPlanner::ufomapCallback(const sensor_msgs::PointCloud2::ConstPtr& clou
         //ROS_INFO("b4 insetion of pointcloud");
         ufomap_.insertPointCloud(ufo_cloud, sensor_origin, ufomap_max_range_, 0, false, 0); // if virtual_camera topic is used, make sure that max range is less than the topics max range  
         //ROS_INFO("between insertion and viz");
-        ufomap_viz_.standard_visualization(&ufomap_, session_number_, STLAEPlanner::gain_function);
+        ufomap_viz_.standard_visualization(&ufomap_, session_number_);//, STLAEPlanner::gain_function);
         //ROS_INFO("after viz");
     }
     //ufomap_mutex_.unlock();

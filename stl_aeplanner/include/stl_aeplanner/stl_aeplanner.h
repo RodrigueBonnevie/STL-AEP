@@ -41,11 +41,12 @@
 #include <tf2/utils.h>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.h>
-#include <tf2/buffer_core.h>
+#include <tf2_ros/buffer.h>
 
 #include <mutex>
 
 #include <thesis/spawn_n_delete_objects.h>
+#include <thesis/spawn_n_delete.h>
 #include <thesis/evaluate_dynamic_map.h>
 
 namespace stl_aeplanner
@@ -74,7 +75,7 @@ private:
   //std::shared_ptr<octomap::OcTree> ot_;
 
   // Ufomap with dynamic parameters
-  tf2::BufferCore tfBuffer_;
+  tf2_ros::Buffer tfBuffer_;
   tf2_ros::TransformListener* tfl_;
   tf::TransformListener tfListener_;
   int session_number_ = 0;
@@ -83,7 +84,8 @@ private:
   std::mutex ufomap_mutex_;
   geometry_msgs::TransformStamped transform_;  // Ros transform for pointcloud to ufomap
   Eigen::Vector4d home_pose_v4; 
-  objects::Session_manager session_manager_;
+  //objects::Session_manager session_manager_;
+  ros::ServiceClient spawn_n_delete_client_;
 
   bool going_home_ = false;
   
@@ -166,7 +168,7 @@ private:
 
   std::pair<double, double> getGain(std::shared_ptr<RRTNode> node);
   std::pair<double, double> gainCubature(Eigen::Vector4d state);
-  static double gain_function(const ufomap::Octree*, const ufomap::OccupancyNode* node, int session_number, double dV);
+  double gain_function(const ufomap::Octree*, const ufomap::OccupancyNode* node, int session_number, double dV);
 
   // ---------------- Helpers ----------------
   //
@@ -207,8 +209,10 @@ public:
   void expandRRTUfomap(value_rtree* rtree,
                                  std::shared_ptr<point_rtree> stl_rtree,
                                  const Eigen::Vector4d& current_state);
+  void writeMap(std::string filename);
+  void writeParams2file(std::string path, std::string ufofilename);
 
-  void transformCallback(const geometry_msgs::TransformStamped::ConstPtr& msg);
+  void transformCallback(const geometry_msgs::TransformStamped::ConstPtr &msg);
   ufomap_visualization::Visualization ufomap_viz_;
 
 };

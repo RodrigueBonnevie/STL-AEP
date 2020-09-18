@@ -14,6 +14,8 @@ void STLAEPlannerNodelet::onInit()
 }
 STLAEPlannerNodelet::~STLAEPlannerNodelet()
 {
+  std::string path = "/home/rodrigue/catkin_ws/src/thesis/ufomaps/";
+  stl_aeplanner_->writeMap(path);
   delete stl_aeplanner_;
 }
 }  // namespace stl_aeplanner

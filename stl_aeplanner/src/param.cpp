@@ -133,6 +133,26 @@ Params readParams()
   {
     ROS_WARN("Looking for %s. Default is false.", (ns + "/visualize_exploration_area").c_str());
   }
+  params.session_length = 20;
+  if (!ros::param::get(ns + "/session_length", params.session_length))
+  {
+    ROS_WARN("Looking for %s. Default is 20.", (ns + "/session_length").c_str());
+  }
+  params.gainf_dyn = 1;
+  if (!ros::param::get(ns + "/gainf_dyn", params.gainf_dyn))
+  {
+    ROS_WARN("Looking for %s. Default is 1.", (ns + "/gainf_dyn").c_str());
+  }
+  params.gainf_last_obs = 1;
+  if (!ros::param::get(ns + "/gainf_last_obs", params.gainf_last_obs))
+  {
+    ROS_WARN("Looking for %s. Default is 1.", (ns + "/gainf_last_obs").c_str());
+  }
+  params.reexplore_sess = 10;
+  if (!ros::param::get(ns + "/reexplore_sess", params.reexplore_sess))
+  {
+    ROS_WARN("Looking for %s. Default is 1.", (ns + "/reexplore_sess").c_str());
+  }
 
   return params;
 }

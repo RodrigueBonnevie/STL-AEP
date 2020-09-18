@@ -151,7 +151,15 @@ int main(int argc, char** argv)
 
   ros::Time start = ros::Time::now();
   ros::Time session_start = ros::Time::now();
-  ros::Duration session_length = ros::Duration(20);
+  double sl = 20;
+  std::string ns = ros::this_node::getNamespace();
+  if (!ros::param::get(ns + "/session_length", sl))
+  {
+    ROS_WARN("Looking for %s. Default is 20.", (ns + "/session_length").c_str());
+  }
+    ROS_WARN("Looking for %s. Default is 20.", (ns + "/session_length").c_str());
+  ROS_INFO("sesssion_lenght is : %f", sl);
+  ros::Duration session_length = ros::Duration(sl);
   while (ros::ok())
   {
     stl_aeplanner_msgs::aeplannerGoal aep_goal;
